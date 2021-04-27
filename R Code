@@ -1,0 +1,357 @@
+### Install all Libraries example:
+### Note the use of speaech marks here
+#install.packages("ggplot2")
+#install.packages("plyr")
+#install.packages("tidyr")
+#install.packages("ggpmisc")
+#install.packages("svMisc")
+#install.packages("factoextra")
+#install.packages("pca3d")
+#install.packages("devtools")
+#install.packages("ggthemes")
+install.packages("randomForest")
+
+### Load Libraries for use...
+library(ggplot2)
+library(plyr)
+library(tidyr)
+library(ggpmisc)
+library(svMisc)
+library(factoextra)
+library(pca3d)
+library(ggrepel)
+library(ggthemes)
+library(randomForest)
+library(scales)
+
+### https://exts.ggplot2.tidyverse.org/ggiraph.html 
+
+### Read in the files - there are 2 counts files one logged and one not. 
+pheno = read.csv(file="pheno_meta updated.csv", stringsAsFactors = T, na = c(""))
+### Logged
+#counts = read.csv(file="counts_meta.csv", stringsAsFactors = T)
+### Use Counts unlogged.
+counts = read.csv(file="counts_meta_2.csv", stringsAsFactors = F)
+
+### R likes everything to be in 'long format' - so we convert the count table...
+counts_2 <- gather(counts, sample_id, norm_met, P_3248328:P_3248446, factor_key =TRUE)
+
+### Then we merge all the count and pheno data together....
+all_data_meta <-merge(counts_2, pheno, by="sample_id")
+all_data_meta$biological <- as.character(all_data_meta$biological)
+all_data_meta$Met_Path <- as.character(all_data_meta$Met_Path)
+
+#rm(pheno, counts, counts_2) ### remove the other files for now.
+
+###################################################################################################################################################################
+### This will plot PCA graphs
+### PCA -> http://www.sthda.com/english/articles/31-principal-component-methods-in-r-practical-guide/118-principal-component-analysis-in-r-prcomp-vs-princomp/
+### PCA wants data transposed, so
+counts.active <- as.data.frame(t(as.matrix(subset(counts, select=-c(2,3)))))
+names(counts.active) <- counts.active[1,]
+counts.active <- counts.active[-1,]
+
+### Perform PCA
+res.pca <- prcomp(counts.active, scale = TRUE)
+fviz_eig(res.pca)
+
+### Graph of individuals. Individuals with a similar profile are grouped together.
+fviz_pca_ind(res.pca,
+             col.ind = "cos2", # Color by the quality of representation
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE)     # Avoid text overlapping
+
+### Graph of variables. Positive correlated variables point to the same side of the plot. Negative correlated variables point to opposite sides of the graph.
+fviz_pca_var(res.pca,
+             col.var = "contrib", # Color by contributions to the PC
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE)    # Avoid text overlapping
+
+### Qualitative / categorical variables can be used to color individuals by groups. The grouping variable should be of same length as the number of active individuals (here 23).
+### this sets a parameter that will define the group if the PCA
+groups <- as.factor(pheno$group)
+### Draw graph
+fviz_pca_ind(res.pca,
+             col.ind = groups, # color by groups
+             palette = c("#00AFBB",  "#FC4E07"),
+             addEllipses = TRUE, # Concentration ellipses
+             ellipse.type = "confidence",
+             legend.title = "Groups",
+             repel = TRUE)
+
+
+### Generate the loading - how our variables contribute to each of the principal components
+### http://strata.uga.edu/8370/lecturenotes/principalComponents.html
+var_coord_func <- function(loadings, comp.sdev){
+  loadings*comp.sdev
+}
+loadings <- res.pca$rotation
+sdev <- res.pca$sdev
+var.coord <- t(apply(loadings, 1, var_coord_func, sdev)) 
+### From the loading compounds you can see that several metabolites are correlated to each component.
+
+
+### PCA indicates that sex/group are confounders.
+### However, group=status so cant use group as a covariate?
+
+###################################################################################################################################################################
+### Stats
+### Two types of analysis - Wilcoxon (non-parametric test of groups) and regression (test of groups, but taking into account confounders)
+### This will loop over a Wilcoxon and a regression analysis and dump into 1 file
+### Create file to put data into...
+results = data.frame(compound_id=c(unique(all_data_meta$compound_id)), 
+                     biological= NA,
+                     Met_Path= NA,
+                     Wilcoxon_PDvC = NA,
+                     FDR_Wilcoxon_PD_C = NA,
+                     Log2FC_PDvC = NA,
+                     Wilcoxon_MCIvCN = NA,
+                     FDR_Wilcoxon_MCIvCN = NA,
+                     Log2FC_MCIvCN = NA,
+                     Regression_PDvC = NA,
+                     FDR_Reg_PDvC = NA,
+                     Regression_MCIvCN = NA,
+                     FDR_Reg_MCIvCN = NA
+)
+### Run Analysis - this can be adapted for more groups. 
+for(i in unique(as.factor(all_data_meta$compound_id)))  {
+  if (length(unique(all_data_meta$biological)[!is.na(unique(all_data_meta$biological))])>=1) {
+    results[results$compound_id==i, "biological"] = unique(all_data_meta[all_data_meta$compound_id==i, "biological"])
+  }
+  if (length(unique(all_data_meta$biological)[!is.na(unique(all_data_meta$biological))])>=1) {
+    results[results$compound_id==i, "Met_Path"] = unique(all_data_meta[all_data_meta$compound_id==i, "Met_Path"])
+  }
+  results[results$compound_id==i, "Wilcoxon_PDvC"] = wilcox.test(norm_met ~ status, data = all_data_meta, subset = compound_id %in% i)$p.value
+  results[results$compound_id==i, "Wilcoxon_MCIvCN"] = wilcox.test(norm_met ~ cog_impair, data = all_data_meta, subset = compound_id %in% i)$p.value
+  results[results$compound_id==i, "Regression_PDvC"] = summary(lm(norm_met ~ status + sex, data = all_data_meta, subset = compound_id %in% i))$coefficients[2,4]
+  results[results$compound_id==i, "Regression_MCIvCN"] = summary(lm(norm_met ~ cog_impair + sex, data = all_data_meta, subset = compound_id %in% i))$coefficients[2,4]
+  results[results$compound_id==i, "Log2FC_PDvC"] = log2(mean(subset(all_data_meta,compound_id %in% i & status=="PD")$norm_met)/mean(subset(all_data_meta,compound_id %in% i & status=="CON")$norm_met))   
+  results[results$compound_id==i, "Log2FC_MCIvCN"] = log2(mean(subset(all_data_meta,compound_id %in% i & cog_impair=="Y")$norm_met)/mean(subset(all_data_meta,compound_id %in% i & cog_impair=="N")$norm_met)) 
+}
+### Include FDR corrected P values.
+results$FDR_Wilcoxon_PD_C=c(p.adjust(results$Wilcoxon_PDvC, method = "fdr", n = length(results$Wilcoxon_PDvC)))
+results$FDR_Wilcoxon_MCIvCN=c(p.adjust(results$Wilcoxon_MCIvCN, method = "fdr", n = length(results$Wilcoxon_MCIvCN)))
+results$FDR_Reg_PDvC=c(p.adjust(results$Regression_PDvC, method = "fdr", n = length(results$Regression_PDvC)))
+results$FDR_Reg_MCIvCN=c(p.adjust(results$Regression_MCIvCN, method = "fdr", n = length(results$Regression_MCIvCN)))
+### Write file to Excel
+write.csv(results, file = "All_Results.csv")
+
+### Correlations between metabolites, age?
+#### We Have to remove the NaNs (log2 of 0 with 0)
+#results$Log2FC_PDvC[is.nan(results$Log2FC_PDvC)]<-0
+#results$Log2FC_MCIvCN[is.nan(results$Log2FC_MCIvCN)]<-0
+### Sanity Check - done to manually test that the above code is working
+### Best metabolite - 44618 - long way round
+#wilcox.test(norm_met ~ sex, data = subset(all_data_meta, compound_id=="44618"))
+#wilcox.test(norm_met ~ cog_impair, data = subset(all_data_meta, compound_id=="37496"))
+###
+#test<-lm(norm_met ~ status + sex + group, data = subset(all_data_meta, compound_id=="44618"))
+#summary(test)
+#test<-lm(norm_met ~ status + sex + group, data = subset(all_data_meta, compound_id=="44618"))
+#summary(test)
+#################
+### Fold Change?
+### log2(mean(post)  /  mean(pre)).
+
+###################################################################################################################################################################
+### Plot Graphs
+### Use theme to set graph drawing parameters.
+my_theme3 <-  theme_bw()  +  
+  theme(panel.border = element_blank())+   
+  theme(axis.line = element_line(color = 'black', size=1.5)) +
+  theme(axis.ticks = element_line(color = 'black', size=1.5)) +
+  theme(text = element_text(size=20, color="black", family = "Arial", face = "bold"))+ 
+  theme(strip.background = element_blank())+
+  theme(legend.key = element_blank())
+
+###################################################################################################################################################################
+### Simple plot of cases versus controls for one metabolite - i.e. 33941 - set as compound_id=="XXXX"
+### Log2 the met_norm
+### This can be cut and pasted to generate more graphs.
+ggplot(data=subset(all_data_meta, compound_id=="44618" & !is.na(status)), aes(x=status, y=log2(norm_met)))+
+  xlab("Status")+ylab("Normalised Metabolite Abundance")+
+  geom_dotplot(binaxis="y",stackdir="center", dotsize = 0.5, binwidth = 0.05, binpositions = "bygroup", fill = "grey80", method="histodot", stackratio = 1.0)+
+  geom_boxplot(outlier.shape = NA, alpha = 0.20, width=0.65, lwd=1.3)+
+  stat_summary(fun=mean, geom="point", shape=24, size=5, fill = "red")+
+  my_theme3
+
+### In this example I have substituted status for the cog_impair column
+ggplot(data=subset(all_data_meta, compound_id=="36098" & !is.na(cog_impair)), aes(x=cog_impair, y=log2(norm_met)))+
+  xlab("Cognitive Impairment")+ylab("Normalised Metabolite Abundance")+
+  geom_dotplot(binaxis="y",stackdir="center", dotsize = 0.5, binwidth = 0.1, binpositions = "bygroup", fill = "grey80", method="histodot", stackratio = 1.0)+
+  geom_boxplot(outlier.shape = NA, alpha = 0.20, width=0.65, lwd=1.3)+
+  stat_summary(fun=mean, geom="point", shape=24, size=5, fill = "red")+
+  my_theme3
+
+### This graph is the same as the above, but I am colouring the dots by a new factor - i.e. sex
+ggplot(data=subset(all_data_meta, compound_id=="33941" & !is.na(status)), aes(x=status, y=log2(norm_met)))+
+  xlab("Status")+ylab("Normalised Metabolite Abundance")+
+  geom_jitter(aes(colour=sex), size=3,shape=16, position=position_jitter(0.1))+
+  #geom_dotplot(binaxis="y",stackdir="center", dotsize = 0.5, binwidth = 0.1, binpositions = "bygroup", fill = "grey80", method="histodot", stackratio = 1.0)+
+  geom_boxplot(outlier.shape = NA, alpha = 0.20, width=0.65, lwd=1.3)+
+  stat_summary(fun=mean, geom="point", shape=24, size=5, fill = "red")+
+  my_theme3
+
+### This graph is the same as the above, but I am colouring the dots by a new factor - i.e. bmi
+ggplot(data=subset(all_data_meta, compound_id=="44618" & !is.na(status)), aes(x=status, y=log2(norm_met)))+
+  xlab("Status")+ylab("Normalised Metabolite Abundance")+
+  geom_jitter(aes(colour=sex), size=3,shape=16, position=position_jitter(0.1))+
+  #geom_dotplot(binaxis="y",stackdir="center", dotsize = 0.5, binwidth = 0.1, binpositions = "bygroup", fill = "grey80", method="histodot", stackratio = 1.0)+
+  geom_boxplot(outlier.shape = NA, alpha = 0.20, width=0.65, lwd=1.3)+
+  stat_summary(fun=mean, geom="point", shape=24, size=5, fill = "red")+
+  my_theme3
+
+### This graph is the same as the above, but I am coloring the dots by a new factor - i.e. treatment = LDOPA_0M  versus 3-methoxytyrosine - 12017
+ggplot(data=subset(all_data_meta, ï..compound_id=="12017" & !is.na(status)), aes(x=status, y=log2(norm_met)))+
+  xlab("Status")+ylab("Normalised 3-methoxytyrosine Abundance")+
+  geom_jitter(aes(colour=LDOPA_0M), size=3,shape=16, position=position_jitter(0.1))+
+  #geom_dotplot(binaxis="y",stackdir="center", dotsize = 0.5, binwidth = 0.1, binpositions = "bygroup", fill = "grey80", method="histodot", stackratio = 1.0)+
+  geom_boxplot(outlier.shape = NA, alpha = 0.20, width=0.65, lwd=1.3)+
+  stat_summary(fun=mean, geom="point", shape=24, size=5, fill = "red")+
+  my_theme3
+
+###################################################################################################################################################################
+### Simple X/Y plot of two variables 
+### Log2 the met_norm
+### In this case we set a fromular for the line
+my.formula <- y ~ x
+
+### In this example we plot age of onset (aoo) against our best hit metabolite from the regression - 33941
+### This will be just cases
+ggplot(data=subset(all_data_meta, compound_id=="33941"), aes(x=aoo, y=log2(norm_met)))+
+  geom_point()+
+  xlab("Age at Onset")+ylab("Normalised Metabolite Abundance (Log10)")+
+  geom_smooth(method=lm)+
+  stat_poly_eq(formula = my.formula, 
+               aes(label = paste(..eq.label.., ..rr.label.., sep = "~~~")), 
+               parse = TRUE)+
+  my_theme3+
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+### In this example we plot bmi against our best hit metabolite from the regression - 33941
+### This is everyone together
+ggplot(data=subset(all_data_meta, compound_id=="33941"), aes(x=age, y=log2(norm_met)))+
+  geom_point()+
+  xlab("BMI at Baseline")+ylab("Normalised Metabolite Abundance (Log10)")+
+  geom_smooth(method=lm)+
+  stat_poly_eq(formula = my.formula, 
+               aes(label = paste(..eq.label.., ..rr.label.., sep = "~~~")), 
+               parse = TRUE)+
+  my_theme3+
+  theme(plot.title = element_text(hjust = 0.5))
+
+### We can separate PD and control by simply adding colour=status to the first line
+ggplot(data=subset(all_data_meta, compound_id=="33941"), aes(x=bmi, y=log2(norm_met), colour=status))+
+  geom_point()+
+  xlab("BMI at Baseline")+ylab("Normalised Metabolite Abundance (Log10)")+
+  geom_smooth(method=lm)+
+  stat_poly_eq(formula = my.formula, 
+               aes(label = paste(..eq.label.., ..rr.label.., sep = "~~~")), 
+               parse = TRUE)+
+  my_theme3+
+  theme(plot.title = element_text(hjust = 0.5))
+
+### Your Caffiene Data 
+### 1,3,7-trimethylurate	1,3-dimethylurate	1,7-dimethylurate	1-methylurate	1-methylxanthine	5-acetylamino-6-amino-3-methyluracil	5-acetylamino-6-formylamino-3-methyluracil	
+### caffeic acid sulfate	caffeine	paraxanthine	theophylline
+### compound_id 569 is caffiene, the best 'hit' is compound 32391 which is 13-dimethylurate
+ggplot(data=subset(all_data_meta, compound_id=="32391"), aes(x=log10(caffiene_T18), y=log2(norm_met), color=status))+
+  geom_point()+
+  xlab("Caffiene Intake (Log10(units/week)")+ylab("Normalised Metabolite Abundance (Log10)")+
+  geom_smooth(method=lm)+
+  stat_poly_eq(formula = my.formula, 
+               aes(label = paste(..eq.label.., ..rr.label.., sep = "~~~")), 
+               parse = TRUE)+
+  my_theme3+ scale_color_manual(values=c("black", "red"))+ 
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+### LDOPA versus 3-methoxytyrosine - 12017
+ggplot(data=subset(all_data_meta, ï..compound_id=="12017"), aes(x=log10(LEDD_0M), y=log2(norm_met), color=status))+
+  geom_point()+
+  xlab("LEDD (Log10(mg))")+ylab("Normalised 3-methoxytyrosine Abundance")+
+  geom_smooth(method=lm)+
+  stat_poly_eq(formula = my.formula, 
+               aes(label = paste(..eq.label.., ..rr.label.., sep = "~~~")), 
+               parse = TRUE)+
+  my_theme3+ scale_color_manual(values=c("black", "red"))+ 
+  theme(plot.title = element_text(hjust = 0.5))
+
+### LDOPA versus 3-methoxytyrosine – 12017
+### Make new smaller data set
+gh_test=subset(all_data_meta, ï..compound_id=="12017")
+gh_test$Methoxytyrosine[gh_test$norm_met > 3.00] <- "High (>3)"
+gh_test$Methoxytyrosine[gh_test$norm_met < 2.99] <- "Low (<3)"
+
+### Graph
+ggplot(data=gh_test, aes(x=log10(LEDD_0M), y=log2(norm_met), colour=Methoxytyrosine))+
+  geom_point()+
+  xlab("LEDD at Baseline (Log10(mg))")+ylab("Normalised Metabolite Abundance (Log10)")+
+  geom_smooth(method=lm)+
+  stat_poly_eq(formula = my.formula, 
+               aes(label = paste(..eq.label.., ..rr.label.., sep = "~~~")), 
+               parse = TRUE)+
+  my_theme3+ scale_color_manual(values=c("black", "red"))+ 
+  theme(plot.title = element_text(hjust = 0.5))
+
+###
+ggplot(data=subset(gh_test, !is.na(LDOPA_0M)), aes(x=LDOPA_0M, y=log2(norm_met)))+
+  xlab("PD Treatment")+ylab("Normalised Metabolite Abundance")+
+  geom_jitter(aes(colour=Methoxytyrosine), size=3,shape=16, position=position_jitter(0.1))+
+  #geom_dotplot(binaxis="y",stackdir="center", dotsize = 0.5, binwidth = 0.1, binpositions = "bygroup", fill = "grey80", method="histodot", stackratio = 1.0)+
+  #geom_boxplot(outlier.shape = NA, alpha = 0.20, width=0.65, lwd=1.3)+
+  stat_summary(fun=mean, geom="point", shape=24, size=5, fill = "red")+
+  my_theme3
+
+
+
+###################################################################################################################################################################
+### Volcano Plot
+### Prepare 'results' for plot 
+### add a column of NAs
+results$diffexpressed <- "NO"
+### if log2Foldchange > 1 and pvalue < 0.05, set as "UP" 
+results$diffexpressed[results$Log2FC_PDvC > 1 & results$Wilcoxon_PDvC < 0.05] <- "UP"
+### if log2Foldchange < -1 and pvalue < 0.05, set as "DOWN"
+results$diffexpressed[results$Log2FC_PDvC < -1 & results$Wilcoxon_PDvC < 0.05] <- "DOWN"
+### Create labels for graph
+results$delabel <- NA
+results$delabel[results$diffexpressed != "NO"] <- results$compound_id[results$diffexpressed != "NO"]
+
+### Draw Volcano Plot 
+ggplot(results, aes(x=Log2FC_PDvC, y=-log10(Wilcoxon_PDvC), col=diffexpressed, label=delabel))+
+  geom_point()+
+  xlim(-6,6)+
+  xlab("Log2FC")+ylab("-Log10(P Value)")+
+  geom_hline(yintercept=-log10(0.05), col="red")+
+  geom_vline(xintercept=c(-1,1), col="red")+
+  geom_text_repel(box.padding = 0.5, max.overlaps = Inf,
+                  segment.angle = 20, segment.square    = FALSE,
+                  segment.inflect   = TRUE)+
+  scale_color_manual(values=c("blue", "black", "red"))+
+  theme(legend.position = "none")+
+  my_theme3
+
+###################################################################################################################################################################
+### Random Forest Plot
+### https://www.blopig.com/blog/2017/04/a-very-basic-introduction-to-random-forests-using-r/
+###
+### Prepare 'data' for plot 
+rand_for_data <- counts.active
+rand_for_data <- tibble::rownames_to_column(rand_for_data, "sample_id")
+rand_for_data <- merge(pheno, rand_for_data)
+rand_for_data <- subset(rand_for_data, select=c(9,26:1003))
+colnames(rand_for_data) <- paste("M", colnames(rand_for_data), sep = "_")
+### Plot
+rf_classifier = randomForest(M_status ~ ., data=rand_for_data, importance=TRUE,proximity=TRUE)
+varImpPlot(rf_classifier)
+
+###################################################################################################################################################################
+### Heat Map
+### https://learnr.wordpress.com/2010/01/26/ggplot2-quick-heatmap-plotting/
+###
+#hm_data <- ddply(all_data_meta, .(compound_id), transform, rescale = rescale(norm_met), scale = scale(norm_met))
+#ggplot(hm_data, aes(x=reorder(sample_id,scale), y=as.factor(compound_id)))+
+#  geom_tile(aes(fill = scale), colour = "white")+ 
+#  scale_fill_gradient(low = "white", high = "steelblue")
